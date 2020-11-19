@@ -26,12 +26,15 @@ high_resolution_clock::time_point start;
 #define watch(x) cerr << (#x) << " is " << (x) << "\n"
 
 constexpr int DEPTH = 50;
-const string ACTION_TYPES[] = {"BREW", "CAST", "REST"};
-constexpr int POPULATION_SIZE = 2000;
+const string ACTION_TYPES[] = {"BREW", "CAST", "LEARN", "REST"};
+constexpr int TOME_SIZE = 6;
+constexpr int RECIPES_SIZE = 5;
+constexpr int POPULATION_SIZE = 200;
 constexpr double TIME_LIMIT_FIRST_TURN = 0.85;
 constexpr double TIME_LIMIT = 0.045;
 
 int turn = 0;
+int newSpellStartId = 86;
 
 // Function to generate random numbers in given range
 int random_num(int start, int end) {
@@ -48,13 +51,17 @@ public:
     int delta2;
     int delta3;
     int price;
+    int urgencyPrice;
 
-    Recipe(int id, int delta0, int delta1, int delta2, int delta3, int price);
+    Recipe(int id, int delta0, int delta1, int delta2, int delta3, int price, int urgencyPrice = 0);
+
+    void printDebug();
 };
 
 vector<Recipe *> recipes;
-vector<int> recipesIds;
-vector<int> playerSpellsIds;
+vector<Recipe *> sRecipes;
+vector<Recipe *> allRecipes;
+vector<Recipe *> sAllRecipes;
 
 class Spell {
 public:
@@ -65,59 +72,29 @@ public:
     int delta3;
     bool castable;
     bool sCastable;
+    bool repeatable;
+    int taxValue;
+    int taxGrab;
 
-    Spell(int id, int delta0, int delta1, int delta2, int delta3, bool castable);
+    Spell(int id, int delta0, int delta1, int delta2, int delta3, bool castable, bool repeatable, int taxValue,
+          int taxGrab);
 
     void reset();
 
     void printDebug();
 };
 
-class Player {
-public:
-    int id;
-    int inv0;
-    int sInv0;
-    int inv1;
-    int sInv1;
-    int inv2;
-    int sInv2;
-    int inv3;
-    int sInv3;
-    int score;
-    int sScore;
-    vector<Spell *> spells;
-
-    explicit Player(int id);
-
-    void print();
-
-    void play(const string &actionType, int actionId);
-
-    void brew(int actionId);
-
-    void cast(int actionId);
-
-    void rest();
-
-    void wait();
-
-    void reset();
-
-    int inventorySpace();
-
-    float fitness();
-};
-
-Player *player;
-Player *opponent;
+vector<Spell *> tome;
+vector<Spell *> sTome;
+vector<Spell *> allSpells;
+vector<Spell *> sAllSpells;
 
 class Individual {
 public:
     int playerId;
     string actionTypes[DEPTH];
     int actionIds[DEPTH]{};
-    float fitness = -INFINITY;
+    float fitness = 0;
 
     explicit Individual(int playerId);
 
@@ -136,16 +113,65 @@ public:
     void printDebug();
 };
 
-Recipe::Recipe(int id, int delta0, int delta1, int delta2, int delta3, int price) {
+class Player {
+public:
+    int id;
+    int inv0;
+    int sInv0;
+    int inv1;
+    int sInv1;
+    int inv2;
+    int sInv2;
+    int inv3;
+    int sInv3;
+    int score;
+    int sScore;
+    vector<Spell *> spells;
+    vector<Spell *> sSpells;
+
+    explicit Player(int id);
+
+    void print();
+
+    void play(Individual *individual, const string &actionType, int actionId);
+
+    void brew(Individual *individual, int actionId);
+
+    void cast(Individual *individual, int actionId);
+
+    void learn(Individual *individual, int actionId);
+
+    void rest(Individual *individual);
+
+    void wait();
+
+    void reset();
+
+    int inventorySpace();
+
+    float fitness();
+};
+
+Player *player;
+Player *opponent;
+
+Recipe::Recipe(int id, int delta0, int delta1, int delta2, int delta3, int price, int urgencyPrice) {
     this->id = id;
     this->delta0 = delta0;
     this->delta1 = delta1;
     this->delta2 = delta2;
     this->delta3 = delta3;
     this->price = price;
+    this->urgencyPrice = urgencyPrice;
 }
 
-Spell::Spell(int id, int delta0, int delta1, int delta2, int delta3, bool castable) {
+void Recipe::printDebug() {
+    cerr << "[" << this->id << ", " << this->delta0 << ", " << this->delta1 << ", " << this->delta2 << ", "
+         << this->delta3 << ", " << this->price << "]" << "\n";
+}
+
+Spell::Spell(int id, int delta0, int delta1, int delta2, int delta3, bool castable = true, bool repeatable = true,
+             int taxValue = 0, int taxGrab = 0) {
     this->id = id;
     this->delta0 = delta0;
     this->delta1 = delta1;
@@ -153,6 +179,9 @@ Spell::Spell(int id, int delta0, int delta1, int delta2, int delta3, bool castab
     this->delta3 = delta3;
     this->castable = castable;
     this->sCastable = castable;
+    this->repeatable = repeatable;
+    this->taxValue = taxValue;
+    this->taxGrab = taxGrab;
 }
 
 void Spell::reset() {
@@ -160,7 +189,9 @@ void Spell::reset() {
 }
 
 void Spell::printDebug() {
-    cerr << "[" << this->delta0 << ", " << this->delta1 << ", " << this->delta2 << ", " << this->delta3 << "]" << "\n";
+    cerr << "[" << this->id << ", " << this->delta0 << ", " << this->delta1 << ", " << this->delta2 << ", "
+         << this->delta3 << ", " << this->castable << ", " << this->repeatable << ", " << this->taxValue << ", "
+         << this->taxGrab << "]" << "\n";
 }
 
 Player::Player(int id) {
@@ -181,29 +212,34 @@ void Player::print() {
     cerr << "[" << this->inv0 << ", " << this->inv1 << ", " << this->inv2 << ", " << this->inv3 << "]" << "\n";
 }
 
-void Player::play(const string &actionType, int actionId) {
+void Player::play(Individual *individual, const string &actionType, int actionId) {
     if (actionType == "BREW") {
-        this->brew(actionId);
+        this->brew(individual, actionId);
     } else if (actionType == "CAST") {
-        this->cast(actionId);
+        this->cast(individual, actionId);
+    } else if (actionType == "LEARN") {
+        this->learn(individual, actionId);
     } else if (actionType == "REST") {
-        this->rest();
+        this->rest(individual);
     } else if (actionType == "WAIT") {
         this->wait();
     }
 }
 
-void Player::brew(int actionId) {
-    Recipe *recipe;
+void Player::brew(Individual *individual, int actionId) {
+    Recipe *recipe = recipes[0];
+    int index = 0;
 
-    for (auto &i : recipes) {
-        if (i->id == actionId) {
-            recipe = i;
+    for (int i = 0; i < RECIPES_SIZE; i++) {
+        if (recipes[i]->id == actionId) {
+            recipe = recipes[i];
+            index = i;
         }
     }
 
     if (this->inv0 + recipe->delta0 < 0 || this->inv1 + recipe->delta1 < 0 || this->inv2 + recipe->delta2 < 0
         || this->inv3 + recipe->delta3 < 0) {
+        individual->fitness -= 100;
         return;
     }
 
@@ -212,10 +248,14 @@ void Player::brew(int actionId) {
     this->inv2 += recipe->delta2;
     this->inv3 += recipe->delta3;
     this->score += recipe->price;
+    recipes.erase(recipes.begin() + index);
+    index = random_num(0, allRecipes.size() - 1);
+    recipes.emplace_back(allRecipes[index]);
+    allRecipes.erase(allRecipes.begin() + index);
 }
 
-void Player::cast(int actionId) {
-    Spell *spell;
+void Player::cast(Individual *individual, int actionId) {
+    Spell *spell = this->spells[0];
 
     for (auto &i : this->spells) {
         if (i->id == actionId) {
@@ -224,15 +264,18 @@ void Player::cast(int actionId) {
     }
 
     if (!spell->castable) {
+        individual->fitness -= 100;
         return;
     }
 
     if (this->inventorySpace() < spell->delta0 + spell->delta1 + spell->delta2 + spell->delta3) {
+        individual->fitness -= 100;
         return;
     }
 
     if (this->inv0 + spell->delta0 < 0 || this->inv1 + spell->delta1 < 0 || this->inv2 + spell->delta2 < 0
         || this->inv3 + spell->delta3 < 0) {
+        individual->fitness -= 100;
         return;
     }
 
@@ -243,9 +286,57 @@ void Player::cast(int actionId) {
     spell->castable = false;
 }
 
-void Player::rest() {
+void Player::learn(Individual *individual, int actionId) {
+    Spell *spell = tome[0];
+    int index = 0;
+
+    for (int i = 0; i < TOME_SIZE; i++) {
+        if (tome[i]->id == actionId) {
+            spell = tome[i];
+            index = i;
+        }
+    }
+
+    if (this->inv0 < spell->taxValue) {
+        individual->fitness -= 100;
+        return;
+    }
+
+    if (index == 0) {
+        individual->fitness += 10;
+    }
+
+    for (int i = 0; i < index; i++) {
+        tome[i]->taxGrab++;
+    }
+
+    this->inv0 += spell->taxGrab;
+    int space = this->inventorySpace();
+
+    if (space < 0) {
+        this->inv0 += space;
+    }
+
+    this->spells.emplace_back(new Spell(newSpellStartId, spell->delta0, spell->delta1, spell->delta2, spell->delta3));
+    newSpellStartId++;
+    tome.erase(tome.begin() + index);
+    index = random_num(0, allSpells.size() - 1);
+    tome.emplace_back(allSpells[index]);
+    allSpells.erase(allSpells.begin() + index);
+}
+
+void Player::rest(Individual *individual) {
+    bool restable = false;
+
     for (auto &spell : this->spells) {
-        spell->castable = true;
+        if (!spell->castable) {
+            spell->castable = true;
+            restable = true;
+        }
+    }
+
+    if (!restable) {
+        individual->fitness -= 5;
     }
 }
 
@@ -259,10 +350,11 @@ void Player::reset() {
     this->inv2 = this->sInv2;
     this->inv3 = this->sInv3;
     this->score = this->sScore;
-
-    for (auto &spell : this->spells) {
-        spell->reset();
-    }
+    this->spells = this->sSpells;
+    tome = sTome;
+    allSpells = sAllSpells;
+    recipes = sRecipes;
+    allRecipes = sAllRecipes;
 }
 
 int Player::inventorySpace() {
@@ -279,13 +371,15 @@ Individual::Individual(int playerId) {
 
 void Individual::randomize() {
     for (int i = 0; i < DEPTH; i++) {
-        string actionType = ACTION_TYPES[random_num(0, 2)];
+        string actionType = ACTION_TYPES[random_num(0, 3)];
         int actionId = 0;
 
         if (actionType == "BREW") {
-            actionId = recipesIds.at(random_num(0, recipesIds.size() - 1));
+            actionId = recipes[random_num(0, RECIPES_SIZE - 1)]->id;
         } else if (actionType == "CAST") {
-            actionId = playerSpellsIds.at(random_num(0, playerSpellsIds.size() - 1));
+            actionId = player->spells[random_num(0, player->spells.size() - 1)]->id;
+        } else if (actionType == "LEARN") {
+            actionId = tome[random_num(0, TOME_SIZE - 1)]->id;
         }
 
         this->actionTypes[i] = actionType;
@@ -295,10 +389,10 @@ void Individual::randomize() {
 
 void Individual::simulate() {
     for (int i = 0; i < DEPTH; i++) {
-        player->play(this->actionTypes[i], this->actionIds[i]);
+        player->play(this, this->actionTypes[i], this->actionIds[i]);
     }
 
-    this->fitness = player->fitness();
+    this->fitness += player->fitness();
     player->reset();
 }
 
@@ -321,13 +415,15 @@ Individual *Individual::crossover(Individual *individual) {
 void Individual::mutate() {
     for (int i = 0; i < DEPTH; i++) {
         if (random_num(0, 9) == 0) {
-            string actionType = ACTION_TYPES[random_num(0, 2)];
+            string actionType = ACTION_TYPES[random_num(0, 3)];
             int actionId = 0;
 
             if (actionType == "BREW") {
-                actionId = recipesIds.at(random_num(0, recipesIds.size() - 1));
+                actionId = recipes[random_num(0, RECIPES_SIZE - 1)]->id;
             } else if (actionType == "CAST") {
-                actionId = playerSpellsIds.at(random_num(0, playerSpellsIds.size() - 1));
+                actionId = player->spells[random_num(0, player->spells.size() - 1)]->id;
+            } else if (actionType == "LEARN") {
+                actionId = tome[random_num(0, TOME_SIZE - 1)]->id;
             }
 
             this->actionTypes[i] = actionType;
@@ -343,6 +439,7 @@ void Individual::copy(Individual *individual) {
     }
 
     this->fitness = individual->fitness;
+//    individual->printDebug();
 }
 
 void Individual::printAction() {
@@ -357,6 +454,8 @@ void Individual::printDebug() {
     for (int i = 0; i < DEPTH; i++) {
         cerr << this->actionTypes[i] << " " << this->actionIds[i] << "\n";
     }
+//    cerr << this->actionTypes[0] << " " << this->actionIds[0] << "\n";
+    cerr << this->fitness << "\n";
 }
 
 bool operator<(const Individual &individual1, const Individual &individual2) {
@@ -371,7 +470,88 @@ int main() {
     player = new Player(0);
     opponent = new Player(1);
 
-    auto *best = new Individual(0);
+    allSpells.emplace_back(new Spell(0, -3, 0, 0, 1));
+    allSpells.emplace_back(new Spell(1, 3, -1, 0, 0));
+    allSpells.emplace_back(new Spell(2, 1, 1, 0, 0));
+    allSpells.emplace_back(new Spell(3, 0, 0, 1, 0));
+    allSpells.emplace_back(new Spell(4, 3, 0, 0, 0));
+    allSpells.emplace_back(new Spell(5, 2, 3, -2, 0));
+    allSpells.emplace_back(new Spell(6, 2, 1, -2, 1));
+    allSpells.emplace_back(new Spell(7, 3, 0, 1, -1));
+    allSpells.emplace_back(new Spell(8, 3, -2, 1, 0));
+    allSpells.emplace_back(new Spell(9, 2, -3, 2, 0));
+    allSpells.emplace_back(new Spell(10, 2, 2, 0, -1));
+    allSpells.emplace_back(new Spell(11, -4, 0, 2, 0));
+    allSpells.emplace_back(new Spell(12, 2, 1, 0, 0));
+    allSpells.emplace_back(new Spell(13, 4, 0, 0, 0));
+    allSpells.emplace_back(new Spell(14, 0, 0, 0, 1));
+    allSpells.emplace_back(new Spell(15, 0, 2, 0, 0));
+    allSpells.emplace_back(new Spell(16, 1, 0, 1, 0));
+    allSpells.emplace_back(new Spell(17, -2, 0, 1, 0));
+    allSpells.emplace_back(new Spell(18, -1, -1, 0, 1));
+    allSpells.emplace_back(new Spell(19, 0, 2, -1, 0));
+    allSpells.emplace_back(new Spell(20, 2, -2, 0, 1));
+    allSpells.emplace_back(new Spell(21, -3, 1, 1, 0));
+    allSpells.emplace_back(new Spell(22, 0, 2, -2, 1));
+    allSpells.emplace_back(new Spell(23, 1, -3, 1, 1));
+    allSpells.emplace_back(new Spell(24, 0, 3, 0, -1));
+    allSpells.emplace_back(new Spell(25, 0, -3, 0, 2));
+    allSpells.emplace_back(new Spell(26, 1, 1, 1, -1));
+    allSpells.emplace_back(new Spell(27, 1, 2, -1, 0));
+    allSpells.emplace_back(new Spell(28, 4, 1, -1, 0));
+    allSpells.emplace_back(new Spell(29, -5, 0, 0, 2));
+    allSpells.emplace_back(new Spell(30, -4, 0, 1, 1));
+    allSpells.emplace_back(new Spell(31, 0, 3, 2, -2));
+    allSpells.emplace_back(new Spell(32, 1, 1, 3, -2));
+    allSpells.emplace_back(new Spell(33, -5, 0, 3, 0));
+    allSpells.emplace_back(new Spell(34, -2, 0, -1, 2));
+    allSpells.emplace_back(new Spell(35, 0, 0, -3, 3));
+    allSpells.emplace_back(new Spell(36, 0, -3, 3, 0));
+    allSpells.emplace_back(new Spell(37, -3, 3, 0, 0));
+    allSpells.emplace_back(new Spell(38, -2, 2, 0, 0));
+    allSpells.emplace_back(new Spell(39, 0, 0, -2, 2));
+    allSpells.emplace_back(new Spell(40, 0, -2, 2, 0));
+    allSpells.emplace_back(new Spell(41, 0, 0, 2, -1));
+
+    allRecipes.emplace_back(new Recipe(42, 2, 2, 0, 0, 6));
+    allRecipes.emplace_back(new Recipe(43, 3, 2, 0, 0, 7));
+    allRecipes.emplace_back(new Recipe(44, 0, 4, 0, 0, 8));
+    allRecipes.emplace_back(new Recipe(45, 2, 0, 2, 0, 8));
+    allRecipes.emplace_back(new Recipe(46, 2, 3, 0, 0, 8));
+    allRecipes.emplace_back(new Recipe(47, 3, 0, 2, 0, 9));
+    allRecipes.emplace_back(new Recipe(48, 0, 2, 2, 0, 10));
+    allRecipes.emplace_back(new Recipe(49, 0, 5, 0, 0, 10));
+    allRecipes.emplace_back(new Recipe(50, 2, 0, 0, 2, 10));
+    allRecipes.emplace_back(new Recipe(51, 2, 0, 3, 0, 11));
+    allRecipes.emplace_back(new Recipe(52, 3, 0, 0, 2, 11));
+    allRecipes.emplace_back(new Recipe(53, 0, 0, 4, 0, 12));
+    allRecipes.emplace_back(new Recipe(54, 0, 2, 0, 2, 12));
+    allRecipes.emplace_back(new Recipe(55, 0, 3, 2, 0, 12));
+    allRecipes.emplace_back(new Recipe(56, 0, 2, 3, 0, 13));
+    allRecipes.emplace_back(new Recipe(57, 0, 0, 2, 2, 14));
+    allRecipes.emplace_back(new Recipe(58, 0, 3, 0, 2, 14));
+    allRecipes.emplace_back(new Recipe(59, 2, 0, 0, 3, 14));
+    allRecipes.emplace_back(new Recipe(60, 0, 0, 5, 0, 15));
+    allRecipes.emplace_back(new Recipe(61, 0, 0, 0, 4, 16));
+    allRecipes.emplace_back(new Recipe(62, 0, 2, 0, 3, 16));
+    allRecipes.emplace_back(new Recipe(63, 0, 0, 3, 2, 17));
+    allRecipes.emplace_back(new Recipe(64, 0, 0, 2, 3, 18));
+    allRecipes.emplace_back(new Recipe(65, 0, 0, 0, 5, 20));
+    allRecipes.emplace_back(new Recipe(66, 2, 1, 0, 1, 9));
+    allRecipes.emplace_back(new Recipe(67, 0, 2, 1, 1, 12));
+    allRecipes.emplace_back(new Recipe(68, 1, 0, 2, 1, 12));
+    allRecipes.emplace_back(new Recipe(69, 2, 2, 2, 0, 13));
+    allRecipes.emplace_back(new Recipe(70, 2, 2, 0, 2, 15));
+    allRecipes.emplace_back(new Recipe(71, 2, 0, 2, 2, 17));
+    allRecipes.emplace_back(new Recipe(72, 0, 2, 2, 2, 19));
+    allRecipes.emplace_back(new Recipe(73, 1, 1, 1, 1, 12));
+    allRecipes.emplace_back(new Recipe(74, 3, 1, 1, 1, 14));
+    allRecipes.emplace_back(new Recipe(75, 1, 3, 1, 1, 16));
+    allRecipes.emplace_back(new Recipe(76, 1, 1, 3, 1, 18));
+    allRecipes.emplace_back(new Recipe(77, 1, 1, 1, 3, 20));
+
+    vector<Individual *> playerPopulation;
+    vector<Individual *> playerNewGeneration;
 
     // game loop
     while (true) {
@@ -422,20 +602,28 @@ int main() {
             cin.ignore();
 
             if (actionType == "BREW") {
-                recipesIds.emplace_back(actionId);
-                auto *recipe = new Recipe(actionId, delta0, delta1, delta2, delta3, price);
+                auto *recipe = new Recipe(actionId, delta0, delta1, delta2, delta3, price, tomeIndex);
                 recipes.emplace_back(recipe);
+                allRecipes.erase(allRecipes.begin() + i);
             }
 
             if (actionType == "CAST") {
-                playerSpellsIds.emplace_back(actionId);
-                auto *spell = new Spell(actionId, delta0, delta1, delta2, delta3, castable);
+                auto *spell = new Spell(actionId, delta0, delta1, delta2, delta3, castable, false, 0, 0);
                 player->spells.emplace_back(spell);
+                player->sSpells.emplace_back(spell);
+            }
+
+            if (actionType == "LEARN") {
+                auto *spell = new Spell(actionId, delta0, delta1, delta2, delta3, castable, repeatable, tomeIndex,
+                                        taxCount);
+                tome.emplace_back(spell);
+                allSpells.erase(allSpells.begin() + i);
             }
 
             if (actionType == "OPPONENT_CAST") {
-                auto *spell = new Spell(actionId, delta0, delta1, delta2, delta3, castable);
+                auto *spell = new Spell(actionId, delta0, delta1, delta2, delta3, castable, false, 0, 0);
                 opponent->spells.emplace_back(spell);
+                opponent->sSpells.emplace_back(spell);
             }
         }
 
@@ -477,19 +665,34 @@ int main() {
             }
         }
 
+        sTome = tome;
+        sAllSpells = allSpells;
+        sRecipes = recipes;
+        sAllRecipes = allRecipes;
+
+        recipes.erase(recipes.begin());
+
+        for (int i = 0; i < recipes.size() - 1; i++) {
+            recipes[i]->printDebug();
+        }
+
+        cerr << "\n";
+
+        for (int i = 0; i < sRecipes.size() - 1; i++) {
+            sRecipes[i]->printDebug();
+        }
+
         // *************************************************************************************************************
         // <Genetic Evolution>
         // *************************************************************************************************************
 
         double limit = turn ? TIME_LIMIT : TIME_LIMIT_FIRST_TURN;
 
-        vector<Individual *> playerPopulation;
-        vector<Individual *> playerNewGeneration;
-
         playerPopulation.push_back(new Individual(0));
         playerPopulation[0]->randomize();
         playerPopulation[0]->simulate();
 
+        auto *best = new Individual(0);
         best->copy(playerPopulation[0]);
 
         int generation = 1;
@@ -547,16 +750,30 @@ int main() {
 
         best->printAction();
 
+        allRecipes.clear();
+        allRecipes.shrink_to_fit();
+//        sAllRecipes.clear();
+//        sAllRecipes.shrink_to_fit();
+        allSpells.clear();
+        allSpells.shrink_to_fit();
+//        sAllSpells.clear();
+//        sAllSpells.shrink_to_fit();
         recipes.clear();
         recipes.shrink_to_fit();
-        recipesIds.clear();
-        recipesIds.shrink_to_fit();
-        playerSpellsIds.clear();
-        playerSpellsIds.shrink_to_fit();
+//        sRecipes.clear();
+//        sRecipes.shrink_to_fit();
         player->spells.clear();
         player->spells.shrink_to_fit();
+//        player->sSpells.clear();
+//        player->sSpells.shrink_to_fit();
+        tome.clear();
+        tome.shrink_to_fit();
+//        sTome.clear();
+//        sTome.shrink_to_fit();
         opponent->spells.clear();
         opponent->spells.shrink_to_fit();
+//        opponent->sSpells.clear();
+//        opponent->sSpells.shrink_to_fit();
         playerPopulation.clear();
         playerPopulation.shrink_to_fit();
         playerNewGeneration.clear();
